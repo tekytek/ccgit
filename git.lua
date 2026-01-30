@@ -43,53 +43,65 @@ local function findConfig()
     return nil, nil
 end
 
-local function loadConfig(requireRepo)
-    local configPath, rootPath = findConfig()
-    if configPath then
+local function loadConfig(targetDir)
+    local configPath = fs.combine(targetDir, ".git_config")
+    if fs.exists(configPath) then
         local file = fs.open(configPath, "r")
         local data = textutils.unserialize(file.readAll())
         file.close()
-        for k, v in pairs(data) do config[k] = v end
-        return rootPath
+        -- Return a new config table for this specific repo
+        local repoConfig = {}
+        for k, v in pairs(data) do repoConfig[k] = v end
+        -- Fallback to global config for auth if missing locally? 
+        -- For now, assume each repo config has what it needs or we use global vars.
+        -- Actually, user/token might be global preferences.
+        -- Let's merge global 'running' config if keys are missing?
+        if config.token and not repoConfig.token then repoConfig.token = config.token end
+        if config.username and not repoConfig.username then repoConfig.username = config.username end
+        return repoConfig
     end
-    if requireRepo then
-        error("Not a git repository (or any of the parent directories): .git_config not found")
-    end
-    return shell.dir()
+    return nil
 end
 
-local function saveConfig()
-    local configPath, _ = findConfig()
-    if not configPath then configPath = ".git_config" end
+local function findAllRepos(startDir)
+    local repos = {}
+    local queue = { startDir }
     
-    local file = fs.open(configPath, "w")
-    file.write(textutils.serialize(config))
-    file.close()
+    -- Limit depth to avoid scanning entire drive if started at root?
+    -- For now, simple BFS
+    while #queue > 0 do
+        local current = table.remove(queue, 1)
+        if fs.exists(fs.combine(current, ".git_config")) then
+            table.insert(repos, current)
+        end
+        
+        local list = fs.list(current)
+        for _, item in ipairs(list) do
+            local path = fs.combine(current, item)
+            if fs.isDir(path) and item ~= ".git_temp_update" and item ~= "rom" then
+                 -- Don't recurse INTO a repo (nested repos are tricky/bad practice here)
+                 -- but we just found one above. 
+                 -- Actually, if current IS a repo, do we look inside?
+                 -- Let's say yes, but usually repos are leaves.
+                 table.insert(queue, path)
+            end
+        end
+    end
+    return repos
 end
 
--- Helpers
-local function printUsage()
-    print("Usage: git <command> [args]")
-    print("Commands:")
-    print("  config <key> <value>  Set configuration")
-    print("  clone <user>/<repo>   Clone a repository")
-    print("  pull                  Merge remote into local (additive)")
-    print("  update                Clean install (wipes local, installs remote)")
-    print("  push <file>           Upload file changes")
-    print("  daemon [interval]     Run 'update' periodically (foreground)")
-    print("  service [interval]    Run 'daemon' in a new background tab")
-end
-
-local function request(url, method, body, headers)
+-- Refactor request to take a specific config
+local function request(url, method, body, headers, repoConfig)
     headers = headers or {}
     headers["User-Agent"] = "ComputerCraft-Git"
     headers["Accept"] = "application/vnd.github.v3+json"
     
-    if config.token then
-        headers["Authorization"] = "token " .. config.token
+    local effectiveConfig = repoConfig or config
+    
+    if effectiveConfig.token then
+        headers["Authorization"] = "token " .. effectiveConfig.token
     end
 
-    -- Quiet log for daemon
     if not config.quiet then
         print("Requesting: " .. url)
     end
@@ -104,7 +116,6 @@ local function request(url, method, body, headers)
             return nil
         end
     else
-        -- ASYNC REQUEST for PUT/POST
         http.request(url, body, headers, method)
         while true do
             local event, rUrl, rHandle = os.pullEvent()
@@ -122,9 +133,8 @@ local function request(url, method, body, headers)
     end
 end
 
--- Recursive function to download contents
-local function downloadPath(repoContentsUrl, localPath)
-    local items = request(repoContentsUrl, "GET")
+local function downloadPath(repoContentsUrl, localPath, repoConfig)
+    local items = request(repoContentsUrl, "GET", nil, nil, repoConfig)
     if not items then 
         if not config.quiet then print("Failed to list contents: " .. repoContentsUrl) end
         return false
@@ -151,7 +161,7 @@ local function downloadPath(repoContentsUrl, localPath)
                     success = false
                 end
             elseif item.type == "dir" then
-                if not downloadPath(item.url, fs.combine(localPath, item.name)) then
+                if not downloadPath(item.url, fs.combine(localPath, item.name), repoConfig) then
                     success = false
                 end
             end
@@ -160,131 +170,84 @@ local function downloadPath(repoContentsUrl, localPath)
     return success
 end
 
-local function cleanDirectory(dir, excludeList)
-    local list = fs.list(dir)
-    for _, file in ipairs(list) do
-        local skip = false
-        for _, exclude in ipairs(excludeList) do
-            if file == exclude then skip = true break end
-        end
-        if not skip then
-            fs.delete(fs.combine(dir, file))
-        end
-    end
-end
-
-local function moveContents(source, dest)
-    local list = fs.list(source)
-    for _, file in ipairs(list) do
-        local srcPath = fs.combine(source, file)
-        local destPath = fs.combine(dest, file)
-        if fs.exists(destPath) then
-            fs.delete(destPath)
-        end
-        fs.move(srcPath, destPath)
-    end
-end
-
--- Commands
-local commands = {}
-
-function commands.config(args)
-    if #args < 2 then
-        print("Usage: git config <key> <value>")
-        return
-    end
-    loadConfig(false)
-    config[args[1]] = args[2]
-    saveConfig()
-    print("Config updated: " .. args[1] .. " = " .. args[2])
-end
-
-function commands.clone(args)
-    if #args < 1 then
-        print("Usage: git clone <user>/<repo> [branch]")
-        return
-    end
+-- Internal update logic for a specific path
+local function performUpdate(root, repoConfig)
+    if not repoConfig then return false, "No config" end
+    if not repoConfig.repo then return false, "No repo set" end
     
-    local repoName = args[1]
-    local branch = args[2] or "main"
-    
-    config.repo = repoName
-    config.branch = branch
-    saveConfig()
-    
-    local url = GITHUB_API .. repoName .. "/contents?ref=" .. branch
-    print("Cloning " .. repoName .. " (" .. branch .. ")...")
-    if downloadPath(url, "") then
-        print("Clone complete.")
-    else
-        print("Clone failed (incomplete).")
-    end
-end
-
-function commands.pull(args)
-    local root = loadConfig(true)
-    local url = GITHUB_API .. config.repo .. "/contents?ref=" .. config.branch
-    print("Pulling from " .. config.repo .. " (" .. config.branch .. ")...")
-    
-    local currentDir = shell.dir()
-    shell.setDir(root)
-    if downloadPath(url, "") then
-        print("Pull complete.")
-    else
-        print("Pull failed.")
-    end
-    shell.setDir(currentDir)
-end
-
-function commands.update(args)
-    local root = loadConfig(true)
     local tempDir = fs.combine(root, ".git_temp_update")
-    
-    if fs.exists(tempDir) then
-        fs.delete(tempDir)
-    end
+    if fs.exists(tempDir) then fs.delete(tempDir) end
     fs.makeDir(tempDir)
     
-    local url = GITHUB_API .. config.repo .. "/contents?ref=" .. config.branch
-    if not config.quiet then print("Updating from " .. config.repo .. " (" .. config.branch .. ")...") end
+    local url = GITHUB_API .. repoConfig.repo .. "/contents?ref=" .. (repoConfig.branch or "main")
+    if not config.quiet then print("  Downloading " .. repoConfig.repo .. "...") end
     
-    -- Download to temp
-    local success = downloadPath(url, tempDir)
+    local success = downloadPath(url, tempDir, repoConfig)
     
     if success then
-        if not config.quiet then print("Download success. Applying update...") end
-        -- Clean root
-        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(runningProgram) })
-        -- Move files
-        moveContents(tempDir, root)
         -- Cleanup
+        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(runningProgram) })
+        moveContents(tempDir, root)
         fs.delete(tempDir)
-        if not config.quiet then print("Update complete.") end
+        return true
     else
-        if not config.quiet then print("Update failed during download. Reverting...") end
         fs.delete(tempDir)
+        return false, "Download failed"
+    end
+end
+
+-- Commands Update
+function commands.update(args)
+    -- Single repo update (current dir)
+    local root = shell.dir()
+    local repoConfig = loadConfig(root)
+    if not repoConfig then
+        print("Error: Not a git repository (no .git_config found in " .. root .. ")")
+        return
+    end
+    
+    print("Updating " .. root .. "...")
+    local success, err = performUpdate(root, repoConfig)
+    if success then
+        print("Update complete.")
+    else
+        print("Update failed: " .. (err or "Unknown"))
     end
 end
 
 function commands.daemon(args)
-    loadConfig(true)
     local interval = tonumber(args[1]) or 300
-    config.quiet = true -- Suppress detailed logs in daemon mode
+    config.quiet = true 
     
-    -- Set Multishell Title if available
     if multishell then
         multishell.setTitle(multishell.getCurrent(), "Git Daemon")
     end
     
     print("Starting background git daemon.")
-    print("Repo: " .. config.repo)
+    print("Scanning for repositories in: " .. shell.dir())
     print("Interval: " .. interval .. " seconds")
     
     while true do
-        print("[" .. os.time() .. "] Checking for updates...")
-        local status, err = pcall(function() commands.update({}) end)
-        if not status then
-            print("Update failed: " .. err)
+        print("[" .. os.time() .. "] Scanning for updates...")
+        local repos = findAllRepos(shell.dir())
+        
+        if #repos == 0 then
+             print("No repositories found.")
+        else
+            for _, repoRoot in ipairs(repos) do
+                -- Check if this repo matches the daemon's own root OR if we are scanning subdirs
+                -- Just update everything found.
+                print("Checking " .. repoRoot .. "...")
+                local repoConfig = loadConfig(repoRoot)
+                if repoConfig then
+                     local success, err = performUpdate(repoRoot, repoConfig)
+                     if success then
+                        if not config.quiet then print("  " .. repoRoot .. " Updated.") end
+                     else
+                        print("  " .. repoRoot .. " Failed: " .. (err or "Unknown"))
+                     end
+                end
+            end
         end
         os.sleep(interval)
     end
