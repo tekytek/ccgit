@@ -253,7 +253,7 @@ function commands.update(args)
     if success then
         if not config.quiet then print("Download success. Applying update...") end
         -- Clean root
-        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom" }) -- 'rom' is safe to ignore but just in case
+        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(shell.getRunningProgram()) })
         -- Move files
         moveContents(tempDir, root)
         -- Cleanup
