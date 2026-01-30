@@ -3,6 +3,7 @@
 -- Usage: git <command> [args]
 
 local args = { ... }
+local runningProgram = shell.getRunningProgram() or "git.lua"
 local GITHUB_API = "https://api.github.com/repos/"
 
 -- Base64 Polyfill (for compatibility)
@@ -253,7 +254,7 @@ function commands.update(args)
     if success then
         if not config.quiet then print("Download success. Applying update...") end
         -- Clean root
-        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(shell.getRunningProgram()) })
+        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(runningProgram) })
         -- Move files
         moveContents(tempDir, root)
         -- Cleanup
