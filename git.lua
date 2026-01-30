@@ -43,6 +43,19 @@ local function findConfig()
     return nil, nil
 end
 
+local function findConfig()
+    local path = shell.dir()
+    while true do
+        local check = fs.combine(path, ".git_config")
+        if fs.exists(check) then
+            return check, path
+        end
+        if path == "" or path == ".." then break end
+        path = fs.getDir(path)
+    end
+    return nil, nil
+end
+
 local function loadConfig(targetDir)
     local configPath = fs.combine(targetDir, ".git_config")
     if fs.exists(configPath) then
@@ -252,12 +265,12 @@ function commands.config(args)
         return
     end
     
-    local root = shell.dir()
-    local repoConfig = loadConfig(root)
-    if not repoConfig then
-         -- Initialize new config if not exists?
-         repoConfig = { branch = "main" }
+    local _, root = findConfig()
+    if not root then
+         root = shell.dir()
     end
+    
+    local repoConfig = loadConfig(root) or {}
     
     repoConfig[args[1]] = args[2]
     saveConfig(root, repoConfig)
@@ -273,13 +286,15 @@ function commands.clone(args)
     local repoName = args[1]
     local branch = args[2] or "main"
     
-    local initialConfig = {
-        repo = repoName,
-        branch = branch
-    }
+    -- Load existing config to preserve tokens/settings
+    local currentDir = shell.dir()
+    local initialConfig = loadConfig(currentDir) or {}
+    
+    initialConfig.repo = repoName
+    initialConfig.branch = branch
     
     -- Save config initiates the repo in current dir
-    saveConfig(shell.dir(), initialConfig)
+    saveConfig(currentDir, initialConfig)
     
     local url = GITHUB_API .. repoName .. "/contents?ref=" .. branch
     print("Cloning " .. repoName .. " (" .. branch .. ")...")
@@ -289,7 +304,7 @@ function commands.clone(args)
         local sha = getLatestCommit(initialConfig)
         if sha then
             initialConfig.commit = sha
-            saveConfig(shell.dir(), initialConfig)
+            saveConfig(currentDir, initialConfig)
         end
     else
         print("Clone failed (incomplete).")
