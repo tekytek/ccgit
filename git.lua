@@ -1,5 +1,5 @@
 -- git.lua: Basic Git client for ComputerCraft
--- Supports: clone, pull, push, update, daemon, config
+-- Supports: clone, pull, push, update, daemon, service, config
 -- Usage: git <command> [args]
 
 local args = { ... }
@@ -75,7 +75,8 @@ local function printUsage()
     print("  pull                  Merge remote into local (additive)")
     print("  update                Clean install (wipes local, installs remote)")
     print("  push <file>           Upload file changes")
-    print("  daemon [interval]     Run 'update' periodically")
+    print("  daemon [interval]     Run 'update' periodically (foreground)")
+    print("  service [interval]    Run 'daemon' in a new background tab")
 end
 
 local function request(url, method, body, headers)
@@ -269,6 +270,11 @@ function commands.daemon(args)
     local interval = tonumber(args[1]) or 300
     config.quiet = true -- Suppress detailed logs in daemon mode
     
+    -- Set Multishell Title if available
+    if multishell then
+        multishell.setTitle(multishell.getCurrent(), "Git Daemon")
+    end
+    
     print("Starting background git daemon.")
     print("Repo: " .. config.repo)
     print("Interval: " .. interval .. " seconds")
@@ -280,6 +286,36 @@ function commands.daemon(args)
             print("Update failed: " .. err)
         end
         os.sleep(interval)
+    end
+end
+
+function commands.service(args)
+    local interval = args[1] or "300"
+    
+    if multishell then
+        local tabId = multishell.launch({
+            ["shell"] = shell,
+            ["multishell"] = multishell,
+        }, shell.getRunningProgram(), "daemon", interval)
+        
+        if tabId then
+            print("Git daemon started in background tab (ID: " .. tabId .. ")")
+            multishell.setTitle(tabId, "Git Daemon")
+            -- Switch focus back to current tab so user stays here
+            multishell.setFocus(multishell.getCurrent())
+        else
+             print("Failed to launch background tab.")
+        end
+    elseif shell.openTab then
+        local tabId = shell.openTab(shell.getRunningProgram(), "daemon", interval)
+        if tabId then
+             print("Git daemon started in background tab.")
+        else
+             print("Failed to open tab.")
+        end
+    else
+        print("Error: Multishell/Tab API not available.")
+        print("Use 'bg git daemon " .. interval .. "' if using a custom shell supporting bg.")
     end
 end
 

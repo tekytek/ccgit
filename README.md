@@ -11,6 +11,7 @@ It includes features for **clean updates** (wiping local files to match remote) 
 -   **`push`**: Upload single files to GitHub (requires Personal Access Token).
 -   **`update`**: Perform a "clean install" - wipes the local directory (except config) and redownloads the repository to ensure an exact match.
 -   **`daemon`**: Run a background process that checks for updates periodically.
+-   **`service`**: Launch the daemon in a new background tab (requires Multishell/Advanced Computer).
 -   **Authentication**: Supports private repositories via GitHub Personal Access Tokens.
 
 ## Installation
@@ -65,15 +66,21 @@ git update
 
 To keep your computer updated automatically:
 
+**Method A: New Tab (Recommended)**
 ```lua
--- Run update every 300 seconds (5 minutes)
+-- Opens a new tab running the daemon (every 300s)
+git service 300
+```
+
+**Method B: Foreground**
+```lua
+-- Blocks the current terminal
 git daemon 300
 ```
 
-To run this in the background on startup, add this to your `startup.lua`:
-
+**Startup Script (`startup.lua`)**:
 ```lua
-shell.run("bg git daemon 600")
+shell.run("git service 600")
 ```
 
 ### 5. Pushing Changes
