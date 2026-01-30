@@ -286,15 +286,18 @@ function commands.clone(args)
     local repoName = args[1]
     local branch = args[2] or "main"
     
-    -- Load existing config to preserve tokens/settings
-    local currentDir = shell.dir()
-    local initialConfig = loadConfig(currentDir) or {}
+    -- Load existing config to preserve tokens/settings (search up tree)
+    local _, configDir = findConfig()
+    local initialConfig = {}
+    if configDir then
+        initialConfig = loadConfig(configDir) or {}
+    end
     
     initialConfig.repo = repoName
     initialConfig.branch = branch
     
     -- Save config initiates the repo in current dir
-    saveConfig(currentDir, initialConfig)
+    saveConfig(shell.dir(), initialConfig)
     
     local url = GITHUB_API .. repoName .. "/contents?ref=" .. branch
     print("Cloning " .. repoName .. " (" .. branch .. ")...")
