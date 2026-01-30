@@ -1,5 +1,5 @@
 -- git.lua: Basic Git client for ComputerCraft
--- Supports: clone, pull, push, config
+-- Supports: clone, pull, push, update, daemon, config
 -- Usage: git <command> [args]
 
 local args = { ... }
@@ -58,8 +58,6 @@ local function loadConfig(requireRepo)
 end
 
 local function saveConfig()
-    -- Always save to current directory if not found, or update existing?
-    -- For 'clone', we create new. For 'config', we probably want to update existing if found.
     local configPath, _ = findConfig()
     if not configPath then configPath = ".git_config" end
     
@@ -72,10 +70,12 @@ end
 local function printUsage()
     print("Usage: git <command> [args]")
     print("Commands:")
-    print("  config <key> <value>  Set configuration (user, token, branch)")
-    print("  clone <user>/<repo> [branch]  Clone to current directory")
-    print("  pull                  Update the current repository")
-    print("  push <file>           Upload file changes (requires token)")
+    print("  config <key> <value>  Set configuration")
+    print("  clone <user>/<repo>   Clone a repository")
+    print("  pull                  Merge remote into local (additive)")
+    print("  update                Clean install (wipes local, installs remote)")
+    print("  push <file>           Upload file changes")
+    print("  daemon [interval]     Run 'update' periodically")
 end
 
 local function request(url, method, body, headers)
@@ -87,7 +87,10 @@ local function request(url, method, body, headers)
         headers["Authorization"] = "token " .. config.token
     end
 
-    print("Requesting: " .. url)
+    -- Quiet log for daemon
+    if not config.quiet then
+        print("Requesting: " .. url)
+    end
     
     if method == "GET" then
         local response = http.get(url, headers)
@@ -108,7 +111,9 @@ local function request(url, method, body, headers)
                 rHandle.close()
                 return textutils.unserializeJSON(resBody) or { success = true }
             elseif event == "http_failure" and rUrl == url then
-                print("Error: " .. (rHandle or "Request failed"))
+                if not config.quiet then
+                   print("Error: " .. (rHandle or "Request failed"))
+                end
                 return nil
             end
         end
@@ -119,19 +124,19 @@ end
 local function downloadPath(repoContentsUrl, localPath)
     local items = request(repoContentsUrl, "GET")
     if not items then 
-        print("Failed to list contents: " .. repoContentsUrl)
-        return 
+        if not config.quiet then print("Failed to list contents: " .. repoContentsUrl) end
+        return false
     end
 
     if localPath ~= "" and not fs.exists(localPath) then
         fs.makeDir(localPath)
     end
 
+    local success = true
     for _, item in ipairs(items) do
-        -- Skip .git_config to avoid overwriting it if it exists in repo (unlikely but safe)
         if item.name ~= ".git_config" then
             if item.type == "file" then
-                print("Downloading " .. item.path)
+                if not config.quiet then print("Downloading " .. item.path) end
                 local rawResponse = http.get(item.download_url)
                 if rawResponse then
                     local filePath = fs.combine(localPath, item.name)
@@ -140,12 +145,41 @@ local function downloadPath(repoContentsUrl, localPath)
                     file.close()
                     rawResponse.close()
                 else
-                    print("Failed to download " .. item.name)
+                    if not config.quiet then print("Failed to download " .. item.name) end
+                    success = false
                 end
             elseif item.type == "dir" then
-                downloadPath(item.url, fs.combine(localPath, item.name))
+                if not downloadPath(item.url, fs.combine(localPath, item.name)) then
+                    success = false
+                end
             end
         end
+    end
+    return success
+end
+
+local function cleanDirectory(dir, excludeList)
+    local list = fs.list(dir)
+    for _, file in ipairs(list) do
+        local skip = false
+        for _, exclude in ipairs(excludeList) do
+            if file == exclude then skip = true break end
+        end
+        if not skip then
+            fs.delete(fs.combine(dir, file))
+        end
+    end
+end
+
+local function moveContents(source, dest)
+    local list = fs.list(source)
+    for _, file in ipairs(list) do
+        local srcPath = fs.combine(source, file)
+        local destPath = fs.combine(dest, file)
+        if fs.exists(destPath) then
+            fs.delete(destPath)
+        end
+        fs.move(srcPath, destPath)
     end
 end
 
@@ -174,43 +208,85 @@ function commands.clone(args)
     
     config.repo = repoName
     config.branch = branch
-    
-    -- Save config initiates the repo in current dir
     saveConfig()
     
     local url = GITHUB_API .. repoName .. "/contents?ref=" .. branch
     print("Cloning " .. repoName .. " (" .. branch .. ")...")
-    downloadPath(url, "")
-    print("Clone complete.")
+    if downloadPath(url, "") then
+        print("Clone complete.")
+    else
+        print("Clone failed (incomplete).")
+    end
 end
 
 function commands.pull(args)
     local root = loadConfig(true)
-    
     local url = GITHUB_API .. config.repo .. "/contents?ref=" .. config.branch
     print("Pulling from " .. config.repo .. " (" .. config.branch .. ")...")
-    -- Pull always downloads to the root of the repo
-    -- We need to change dir to root or handle paths effectively?
-    -- downloadPath works with relative paths.
-    -- If we are in a subdir, and we run pull, we want to update everything relative to root.
-    -- The simplest way is to fetch everything and write it relative to root.
-    
-    -- But wait, downloadPath(url, "") writes to shell.dir() + "".
-    -- We want to write to 'root' path.
-    -- We should temporarily change directory or adjust downloadPath.
     
     local currentDir = shell.dir()
     shell.setDir(root)
-    downloadPath(url, "")
+    if downloadPath(url, "") then
+        print("Pull complete.")
+    else
+        print("Pull failed.")
+    end
     shell.setDir(currentDir)
+end
+
+function commands.update(args)
+    local root = loadConfig(true)
+    local tempDir = fs.combine(root, ".git_temp_update")
     
-    print("Pull complete.")
+    if fs.exists(tempDir) then
+        fs.delete(tempDir)
+    end
+    fs.makeDir(tempDir)
+    
+    local url = GITHUB_API .. config.repo .. "/contents?ref=" .. config.branch
+    if not config.quiet then print("Updating from " .. config.repo .. " (" .. config.branch .. ")...") end
+    
+    -- Download to temp
+    local success = downloadPath(url, tempDir)
+    
+    if success then
+        if not config.quiet then print("Download success. Applying update...") end
+        -- Clean root
+        cleanDirectory(root, { ".git_config", ".git_temp_update", "rom" }) -- 'rom' is safe to ignore but just in case
+        -- Move files
+        moveContents(tempDir, root)
+        -- Cleanup
+        fs.delete(tempDir)
+        if not config.quiet then print("Update complete.") end
+    else
+        if not config.quiet then print("Update failed during download. Reverting...") end
+        fs.delete(tempDir)
+    end
+end
+
+function commands.daemon(args)
+    loadConfig(true)
+    local interval = tonumber(args[1]) or 300
+    config.quiet = true -- Suppress detailed logs in daemon mode
+    
+    print("Starting background git daemon.")
+    print("Repo: " .. config.repo)
+    print("Interval: " .. interval .. " seconds")
+    
+    while true do
+        print("[" .. os.time() .. "] Checking for updates...")
+        local status, err = pcall(function() commands.update({}) end)
+        if not status then
+            print("Update failed: " .. err)
+        end
+        os.sleep(interval)
+    end
 end
 
 function commands.push(args)
     local root = loadConfig(true)
     if not config.token then
-        print("Error: No token configured. Run 'git config token <token>'")
+        print("Error: No token configured.")
         return
     end
     
@@ -229,11 +305,8 @@ function commands.push(args)
     -- Calculate repo-relative path
     local relativePath = absolutePath
     if root ~= "" then
-        -- Remove root prefix
-        -- root is like "disk/gitrepo", abs is "disk/gitrepo/subdir/file"
-        -- relative should be "subdir/file"
         if string.sub(absolutePath, 1, #root) == root then
-             relativePath = string.sub(absolutePath, #root + 2) -- +2 for slash
+             relativePath = string.sub(absolutePath, #root + 2)
         end
     end
     
