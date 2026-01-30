@@ -90,6 +90,19 @@ local function findAllRepos(startDir)
     return repos
 end
 
+-- Helpers
+local function printUsage()
+    print("Usage: git <command> [args]")
+    print("Commands:")
+    print("  config <key> <value>  Set configuration")
+    print("  clone <user>/<repo>   Clone a repository")
+    print("  pull                  Merge remote into local (additive)")
+    print("  update                Clean install (wipes local, installs remote)")
+    print("  push <file>           Upload file changes")
+    print("  daemon [interval]     Run 'update' periodically (foreground)")
+    print("  service [interval]    Run 'daemon' in a new background tab")
+end
+
 -- Refactor request to take a specific config
 local function request(url, method, body, headers, repoConfig)
     headers = headers or {}
@@ -131,6 +144,15 @@ local function request(url, method, body, headers, repoConfig)
             end
         end
     end
+end
+
+local function getLatestCommit(repoConfig)
+    local url = "https://api.github.com/repos/" .. repoConfig.repo .. "/commits/" .. (repoConfig.branch or "main")
+    local data = request(url, "GET", nil, nil, repoConfig)
+    if data and data.sha then
+        return data.sha
+    end
+    return nil
 end
 
 local function downloadPath(repoContentsUrl, localPath, repoConfig)
@@ -175,6 +197,18 @@ local function performUpdate(root, repoConfig)
     if not repoConfig then return false, "No config" end
     if not repoConfig.repo then return false, "No repo set" end
     
+    -- Check for updates
+    local latestSha = getLatestCommit(repoConfig)
+    if latestSha then
+        if repoConfig.commit == latestSha then
+             -- No update needed
+             return true, "Up to date"
+        end
+        print("New version detected: " .. string.sub(latestSha, 1, 7))
+    else
+        print("Warning: Could not check version. Forcing update...")
+    end
+    
     local tempDir = fs.combine(root, ".git_temp_update")
     if fs.exists(tempDir) then fs.delete(tempDir) end
     fs.makeDir(tempDir)
@@ -189,14 +223,72 @@ local function performUpdate(root, repoConfig)
         cleanDirectory(root, { ".git_config", ".git_temp_update", "rom", fs.getName(runningProgram) })
         moveContents(tempDir, root)
         fs.delete(tempDir)
-        return true
+        
+        -- Save new SHA
+        if latestSha then
+            repoConfig.commit = latestSha
+            saveConfig(root, repoConfig)
+        end
+        return true, "Updated"
     else
         fs.delete(tempDir)
         return false, "Download failed"
     end
 end
 
--- Commands Update
+-- Commands
+local commands = {}
+
+function commands.config(args)
+    if #args < 2 then
+        print("Usage: git config <key> <value>")
+        return
+    end
+    
+    local root = shell.dir()
+    local repoConfig = loadConfig(root)
+    if not repoConfig then
+         -- Initialize new config if not exists?
+         repoConfig = { branch = "main" }
+    end
+    
+    repoConfig[args[1]] = args[2]
+    saveConfig(root, repoConfig)
+    print("Config updated: " .. args[1] .. " = " .. args[2])
+end
+
+function commands.clone(args)
+    if #args < 1 then
+        print("Usage: git clone <user>/<repo> [branch]")
+        return
+    end
+    
+    local repoName = args[1]
+    local branch = args[2] or "main"
+    
+    local initialConfig = {
+        repo = repoName,
+        branch = branch
+    }
+    
+    -- Save config initiates the repo in current dir
+    saveConfig(shell.dir(), initialConfig)
+    
+    local url = GITHUB_API .. repoName .. "/contents?ref=" .. branch
+    print("Cloning " .. repoName .. " (" .. branch .. ")...")
+    if downloadPath(url, "", initialConfig) then
+        print("Clone complete.")
+        -- Fetch SHA for initial state
+        local sha = getLatestCommit(initialConfig)
+        if sha then
+            initialConfig.commit = sha
+            saveConfig(shell.dir(), initialConfig)
+        end
+    else
+        print("Clone failed (incomplete).")
+    end
+end
+
 function commands.update(args)
     -- Single repo update (current dir)
     local root = shell.dir()
