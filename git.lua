@@ -133,6 +133,9 @@ local function request(url, method, body, headers, repoConfig)
     
     if effectiveConfig.token then
         headers["Authorization"] = "token " .. effectiveConfig.token
+        if not config.quiet then print("[DEBUG] Using Auth Token") end
+    else
+        if not config.quiet then print("[DEBUG] No Auth Token") end
     end
 
     if not config.quiet then
@@ -140,12 +143,13 @@ local function request(url, method, body, headers, repoConfig)
     end
     
     if method == "GET" then
-        local response = http.get(url, headers)
+        local response, err = http.get(url, headers)
         if response then
             local resBody = response.readAll()
             response.close()
             return textutils.unserializeJSON(resBody)
         else
+            if not config.quiet then print("HTTP Error: " .. (err or "Unknown")) end
             return nil
         end
     else
