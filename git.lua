@@ -63,6 +63,13 @@ local function loadConfig(targetDir)
     return nil
 end
 
+local function saveConfig(targetDir, newConfig)
+    local configPath = fs.combine(targetDir, ".git_config")
+    local file = fs.open(configPath, "w")
+    file.write(textutils.serialize(newConfig))
+    file.close()
+end
+
 local function findAllRepos(startDir)
     local repos = {}
     local queue = { startDir }
@@ -289,6 +296,27 @@ function commands.clone(args)
     end
 end
 
+function commands.pull(args)
+    local configPath, root = findConfig()
+    if not root then
+        print("Error: Not in a git repository.")
+        return
+    end
+    local repoConfig = loadConfig(root)
+    
+    local url = GITHUB_API .. repoConfig.repo .. "/contents?ref=" .. (repoConfig.branch or "main")
+    print("Pulling from " .. repoConfig.repo .. " (" .. (repoConfig.branch or "main") .. ")...")
+    
+    local currentDir = shell.dir()
+    shell.setDir(root)
+    if downloadPath(url, "", repoConfig) then
+        print("Pull complete.")
+    else
+        print("Pull failed.")
+    end
+    shell.setDir(currentDir)
+end
+
 function commands.update(args)
     -- Single repo update (current dir)
     local root = shell.dir()
@@ -376,8 +404,15 @@ function commands.service(args)
 end
 
 function commands.push(args)
-    local root = loadConfig(true)
-    if not config.token then
+    local configPath, root = findConfig()
+    if not root then
+        print("Error: Not in a git repository.")
+        return
+    end
+    local repoConfig = loadConfig(root)
+    
+    local effectiveToken = repoConfig.token or config.token
+    if not effectiveToken then
         print("Error: No token configured.")
         return
     end
@@ -409,13 +444,13 @@ function commands.push(args)
     file.close()
     
     -- Get SHA
-    local fileUrl = GITHUB_API .. config.repo .. "/contents/" .. relativePath .. "?ref=" .. config.branch
-    local existingInfo = request(fileUrl, "GET")
+    local fileUrl = GITHUB_API .. repoConfig.repo .. "/contents/" .. relativePath .. "?ref=" .. (repoConfig.branch or "main")
+    local existingInfo = request(fileUrl, "GET", nil, nil, repoConfig)
     
     local body = {
         message = "Update " .. relativePath .. " via ComputerCraft",
         content = encodeBase64(content),
-        branch = config.branch
+        branch = repoConfig.branch or "main"
     }
     
     if existingInfo and existingInfo.sha then
@@ -423,7 +458,7 @@ function commands.push(args)
     end
     
     local jsonBody = textutils.serializeJSON(body)
-    local result = request(fileUrl, "PUT", jsonBody)
+    local result = request(fileUrl, "PUT", jsonBody, nil, repoConfig)
     
     if result then
         print("Successfully pushed " .. relativePath)
